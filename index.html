@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f5f5f7" />
+    <title>Kokoro Reader</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header" aria-label="Reader toolbar">
+        <div class="app-identity">
+          <span class="app-name">Kokoro Reader</span>
+          <span class="local-badge">LOCAL</span>
+          <span class="identity-divider" aria-hidden="true"></span>
+          <label class="sr-only" for="title-input">Document title</label>
+          <input id="title-input" class="title-input" placeholder="Untitled reading" />
+        </div>
+        <div class="header-actions">
+          <div class="mode-tabs" role="tablist" aria-label="Document mode">
+            <button id="listen-mode-button" class="tab-button active" type="button" role="tab" aria-selected="true">
+              <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4.5h12v11H4zM7 8h6M7 11h4" /></svg>
+              <span>Listen</span>
+            </button>
+            <button id="edit-mode-button" class="tab-button" type="button" role="tab" aria-selected="false">
+              <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 14.5-.5 2 2-.5L15 7.5 12.5 5 5 14.5ZM11.5 6l2.5 2.5" /></svg>
+              <span>Edit</span>
+            </button>
+          </div>
+          <div id="runtime-pill" class="runtime-pill" aria-live="polite">
+            <span id="runtime-status-dot" class="status-dot setup" aria-hidden="true"></span>
+            <span id="runtime-status-label">Setup required</span>
+          </div>
+          <button id="cache-panel-button" class="quiet-button cache-panel-button" type="button" aria-expanded="false" aria-controls="cache-panel">
+            <span id="cache-panel-dot" class="status-dot" aria-hidden="true"></span>
+            <span>Cache</span>
+            <span id="cache-panel-count">0/0</span>
+          </button>
+          <button id="theme-toggle" class="quiet-button" type="button" aria-pressed="false">
+            <span>Dark mode</span>
+          </button>
+          <button id="restore-button" class="quiet-button" type="button" disabled>
+            <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5.5h12v11H4zM6.5 3.5h7M7 9h6M7 12h4" /></svg>
+            <span>Restore</span>
+          </button>
+          <button id="reload-files-button" class="quiet-button" type="button" title="Reload this project's source.md and narration.txt">
+            <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 8A5.8 5.8 0 1 0 16 11.5M15.5 4.5V8H12" /></svg>
+            <span>Reload files</span>
+          </button>
+          <div class="shortcut-help">
+            <button class="shortcut-help-button" type="button" aria-label="Show keyboard shortcuts" title="Keyboard shortcuts">?</button>
+            <div class="shortcut-help-panel" role="tooltip">
+              <strong>Keyboard shortcuts</strong>
+              <div class="shortcut-help-list">
+                <span><kbd>Space</kbd> Pause / resume</span>
+                <span><kbd>S</kbd> Restart section</span>
+                <span><kbd>J</kbd> Next section</span>
+                <span><kbd>K</kbd> Previous section</span>
+                <span><kbd>0</kbd> Start document</span>
+                <span><kbd>T</kbd> Jump to marker</span>
+                <span><kbd>←</kbd> Back 5s</span>
+                <span><kbd>→</kbd> Forward 5s</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="reader-card">
+        <section id="model-banner" class="model-banner" aria-live="polite">
+          <div class="model-card-content">
+            <div class="model-state">
+              <span id="model-status-dot" class="status-dot setup" aria-hidden="true"></span>
+              <div>
+                <strong id="model-status-title">Set up offline speech</strong>
+                <p id="model-status-detail">Download Kokoro once. Your documents and audio stay on this Mac.</p>
+              </div>
+            </div>
+            <div id="model-progress-row" class="model-progress-row" hidden>
+              <progress id="model-progress" max="1" value="0" aria-label="Model download progress"></progress>
+              <span id="model-progress-label"></span>
+            </div>
+          </div>
+          <button id="download-button" class="primary-button" type="button">Download model</button>
+        </section>
+
+        <div class="workspace-toolbar">
+          <div class="workspace-project-controls">
+            <span class="workspace-label">Reading view</span>
+            <label class="sr-only" for="project-select">Reading project</label>
+            <select id="project-select" class="project-select" aria-label="Reading project"></select>
+            <button id="delete-project-button" class="quiet-button project-delete-button" type="button" title="Delete this project">
+              <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 6h10M8 6V4.5h4V6M7 8.5v6M10 8.5v6M13 8.5v6M5.5 6l.7 10h7.6l.7-10" /></svg>
+              <span>Delete</span>
+            </button>
+            <button id="mark-read-button" class="quiet-button" type="button" aria-pressed="false" disabled>Mark read</button>
+            <button id="back-to-codex-button" class="quiet-button back-to-codex-button" type="button" hidden>Back to Codex</button>
+          </div>
+          <span class="section-summary" id="section-summary" aria-live="polite">1 section</span>
+        </div>
+
+        <section id="listen-pane" class="listen-pane" aria-label="Rendered document">
+          <nav id="section-navigator" class="section-navigator" tabindex="0" aria-label="Document sections" hidden>
+            <span class="section-navigator-icon" aria-hidden="true"><i></i><i></i><i></i></span>
+            <div id="section-navigator-list" class="section-navigator-list"></div>
+          </nav>
+          <article id="markdown-view" class="markdown-view"></article>
+        </section>
+
+        <section id="edit-pane" class="edit-pane" aria-label="Edit document" hidden>
+          <div class="editor-column">
+            <div class="editor-heading">
+              <div>
+                <span class="editor-kicker">Visual source</span>
+                <label for="markdown-editor">Markdown</label>
+              </div>
+              <span class="editor-hint">Rendered in Listen</span>
+            </div>
+            <textarea id="markdown-editor" spellcheck="false" placeholder="Write or paste Markdown…"></textarea>
+          </div>
+          <div class="editor-column narration-column">
+            <div class="editor-heading">
+              <div>
+                <span class="editor-kicker">Speech layer</span>
+                <span class="editor-title">Narration</span>
+              </div>
+              <span class="editor-hint">Aligned by section</span>
+            </div>
+            <div id="narration-editor" class="narration-editor"></div>
+          </div>
+        </section>
+
+        <footer class="player-bar" aria-label="Playback controls">
+          <div class="player-actions">
+            <button id="play-button" class="play-button" type="button" disabled aria-label="Play">
+              <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 9 6-9 6V4Z" /></svg>
+              <span>Play</span>
+            </button>
+            <button id="stop-button" class="icon-button" type="button" disabled aria-label="Stop">
+              <svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="1" /></svg>
+            </button>
+          </div>
+          <div class="player-settings">
+            <label class="control-group">
+              <span class="control-label">Voice</span>
+              <select id="voice-select" aria-label="Voice">
+                <option value="af_bella">Bella · American female</option>
+                <option value="af_nicole">Nicole · American female</option>
+                <option value="am_fenrir">Fenrir · American male</option>
+              </select>
+            </label>
+            <div class="control-group speed-group">
+              <span class="control-label">Speed <output id="speed-value">1.0×</output></span>
+              <div class="speed-controls">
+                <input id="speed-slider" type="range" min="0.5" max="2" step="0.1" value="1" aria-label="Playback speed" />
+                <div class="speed-presets" role="group" aria-label="Playback speed presets">
+                  <button class="speed-preset" type="button" data-speed="1" aria-pressed="true">1×</button>
+                  <button class="speed-preset" type="button" data-speed="1.2" aria-pressed="false">1.2×</button>
+                  <button class="speed-preset" type="button" data-speed="1.5" aria-pressed="false">1.5×</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p id="activity-status" class="activity-status" aria-live="polite">Ready</p>
+        </footer>
+      </main>
+    </div>
+    <div id="cache-panel-backdrop" class="cache-panel-backdrop" hidden>
+      <aside id="cache-panel" class="cache-panel" role="dialog" aria-modal="true" aria-labelledby="cache-panel-title">
+        <header class="cache-panel-header">
+          <div>
+            <span class="workspace-label">Audio cache</span>
+            <h2 id="cache-panel-title">Cache queue</h2>
+            <p id="cache-panel-summary">Checking cache…</p>
+          </div>
+          <button id="close-cache-panel-button" class="icon-button" type="button" aria-label="Close cache queue">×</button>
+        </header>
+        <section id="cache-active-item" class="cache-active-item" hidden aria-live="polite"></section>
+        <section class="cache-timeline-section" aria-labelledby="cache-queue-title">
+          <h3 id="cache-queue-title">Pending</h3>
+          <ol id="cache-queue-list" class="cache-timeline"></ol>
+        </section>
+        <details class="cache-ready-group">
+          <summary>Ready <span id="cache-ready-count">0</span></summary>
+          <ol id="cache-ready-list" class="cache-timeline"></ol>
+        </details>
+      </aside>
+    </div>
+    <div id="delete-project-dialog" class="dialog-backdrop" hidden>
+      <section class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-project-title" aria-describedby="delete-project-message">
+        <h2 id="delete-project-title">Delete project?</h2>
+        <p id="delete-project-message"></p>
+        <div class="dialog-actions">
+          <button id="cancel-delete-project-button" class="quiet-button" type="button">Cancel</button>
+          <button id="confirm-delete-project-button" class="danger-button" type="button">Delete</button>
+        </div>
+      </section>
+    </div>
+    <audio id="audio-player" preload="auto"></audio>
+  </body>
+</html>

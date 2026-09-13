@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "kokoro-reader": {
+      "command": "/Users/smsantho/Development/ora_proj/external/kokoro-reader/src-tauri/target/release/kokoro-reader",
+      "args": ["--mcp"],
+      "enabled": true,
+      "enabled_tools": [
+        "send_to_reader",
+        "send_file_to_reader",
+        "precheck_reader_files",
+        "append_to_reader_files",
+        "list_reader_projects",
+        "get_reader_project_location",
+        "delete_reader_project"
+      ],
+      "startup_timeout_sec": 30
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "kokoro-reader",
+  "version": "0.1.7+codex.20260913053404",
+  "description": "Format rich content with beginner-friendly visual Markdown and narration, then send it to the local Kokoro Reader.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Kokoro Reader",
+    "shortDescription": "Send readable Markdown to local Kokoro speech.",
+    "longDescription": "Convert rich Markdown into aligned visual and narration sections, add simple Unicode diagrams when they improve understanding, then send it to the local Kokoro Reader app for focused, offline playback.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Send this to Kokoro Reader.",
+      "Format these notes for listening in Kokoro.",
+      "Read this in Kokoro Reader."
+    ],
+    "brandColor": "#5B5BD6",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/icon.png"
+  }
+}

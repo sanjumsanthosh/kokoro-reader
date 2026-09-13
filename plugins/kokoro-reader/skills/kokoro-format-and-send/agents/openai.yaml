@@ -1,0 +1,13 @@
+interface:
+  display_name: "Kokoro Reader"
+  short_description: "Format rich material and send it to the local reader"
+  default_prompt: "Use $kokoro-format-and-send to teach this from scratch. Assume no prior knowledge; build slowly from the real-world problem to the technical details; use simple visual block diagrams and pause-and-predict self-checks; read each self-check question aloud before the answer; then send it to Kokoro Reader."
+
+policy:
+  allow_implicit_invocation: true
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "kokoro-reader"
+      description: "Send the prepared Markdown and companion narration to Kokoro Reader."

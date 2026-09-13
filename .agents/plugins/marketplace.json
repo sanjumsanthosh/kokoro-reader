@@ -1,0 +1,20 @@
+{
+  "name": "kokoro-reader-local",
+  "interface": {
+    "displayName": "Kokoro Reader Local"
+  },
+  "plugins": [
+    {
+      "name": "kokoro-reader",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kokoro-reader"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
