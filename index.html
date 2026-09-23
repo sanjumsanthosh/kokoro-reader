@@ -18,7 +18,7 @@
           <input id="title-input" class="title-input" placeholder="Untitled reading" />
         </div>
         <div class="header-actions">
-          <div class="mode-tabs" role="tablist" aria-label="Document mode">
+          <div class="mode-tabs" role="tablist" aria-label="Reader views">
             <button id="listen-mode-button" class="tab-button active" type="button" role="tab" aria-selected="true">
               <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4.5h12v11H4zM7 8h6M7 11h4" /></svg>
               <span>Listen</span>
@@ -27,6 +27,8 @@
               <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 14.5-.5 2 2-.5L15 7.5 12.5 5 5 14.5ZM11.5 6l2.5 2.5" /></svg>
               <span>Edit</span>
             </button>
+            <button id="articles-mode-button" class="tab-button" type="button" role="tab" aria-selected="false">Articles</button>
+            <button id="storage-mode-button" class="tab-button" type="button" role="tab" aria-selected="false">Storage</button>
           </div>
           <div id="runtime-pill" class="runtime-pill" aria-live="polite">
             <span id="runtime-status-dot" class="status-dot setup" aria-hidden="true"></span>
@@ -61,6 +63,7 @@
                 <span><kbd>T</kbd> Jump to marker</span>
                 <span><kbd>←</kbd> Back 5s</span>
                 <span><kbd>→</kbd> Forward 5s</span>
+                <span><kbd>Ctrl/Cmd F</kbd> Find</span>
               </div>
             </div>
           </div>
@@ -97,10 +100,26 @@
             <button id="mark-read-button" class="quiet-button" type="button" aria-pressed="false" disabled>Mark read</button>
             <button id="back-to-codex-button" class="quiet-button back-to-codex-button" type="button" hidden>Back to Codex</button>
           </div>
-          <span class="section-summary" id="section-summary" aria-live="polite">1 section</span>
+          <div class="workspace-summary">
+            <span class="section-summary" id="section-summary" aria-live="polite">1 section</span>
+            <button id="article-timer" class="article-timer" type="button" aria-pressed="false" disabled>
+              <span id="article-timer-value">—</span>
+            </button>
+            <button id="search-button" class="icon-button search-button" type="button" aria-label="Search document" aria-expanded="false" aria-controls="search-bar" title="Search document (Ctrl/Cmd+F)">
+              <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="4.5" /><path d="m12 12 4 4" /></svg>
+            </button>
+          </div>
         </div>
 
         <section id="listen-pane" class="listen-pane" aria-label="Rendered document">
+          <div id="search-bar" class="search-bar" role="search" hidden>
+            <label class="sr-only" for="search-input">Find in document</label>
+            <input id="search-input" type="search" autocomplete="off" spellcheck="false" placeholder="Find in document" />
+            <span id="search-result-count" class="search-result-count" aria-live="polite">0/0</span>
+            <button id="search-previous-button" class="icon-button" type="button" aria-label="Previous match" title="Previous match (Shift+Enter)">↑</button>
+            <button id="search-next-button" class="icon-button" type="button" aria-label="Next match" title="Next match (Enter)">↓</button>
+            <button id="search-close-button" class="icon-button" type="button" aria-label="Close search" title="Close search (Escape)">×</button>
+          </div>
           <nav id="section-navigator" class="section-navigator" tabindex="0" aria-label="Document sections" hidden>
             <span class="section-navigator-icon" aria-hidden="true"><i></i><i></i><i></i></span>
             <div id="section-navigator-list" class="section-navigator-list"></div>
@@ -109,6 +128,11 @@
         </section>
 
         <section id="edit-pane" class="edit-pane" aria-label="Edit document" hidden>
+          <div id="draft-conflict" class="draft-conflict" hidden>
+            <span>Files changed on disk.</span>
+            <button id="reload-disk-button" class="quiet-button" type="button">Reload disk</button>
+            <button id="keep-edits-button" class="quiet-button" type="button">Keep my edits</button>
+          </div>
           <div class="editor-column">
             <div class="editor-heading">
               <div>
@@ -127,8 +151,32 @@
               </div>
               <span class="editor-hint">Aligned by section</span>
             </div>
+            <div id="alignment-status" class="alignment-status" aria-live="polite">Checking alignment…</div>
             <div id="narration-editor" class="narration-editor"></div>
+            <div id="diagnostics-panel" class="diagnostics-panel" aria-live="polite"></div>
           </div>
+        </section>
+
+        <section id="articles-pane" class="library-pane" aria-label="Articles" hidden>
+          <header class="library-header">
+            <div><span class="workspace-label">Reading library</span><h2>Articles</h2></div>
+            <div class="library-controls">
+              <select id="articles-filter" aria-label="Filter articles"><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select>
+              <button id="delete-selected-button" class="danger-button" type="button" disabled>Delete selected</button>
+            </div>
+          </header>
+          <div class="articles-table-wrap"><table class="articles-table"><thead><tr>
+            <th><input id="articles-select-all" type="checkbox" aria-label="Select visible articles" /></th><th>Article</th><th>Status</th>
+            <th><button class="table-sort" type="button" data-article-sort="created_at">Date added</button></th>
+            <th><button class="table-sort" type="button" data-article-sort="read_at">Marked read</button></th><th>Cached audio</th><th>Actions</th>
+          </tr></thead><tbody id="articles-table-body"></tbody></table></div>
+        </section>
+
+        <section id="storage-pane" class="library-pane" aria-label="Storage" hidden>
+          <header class="library-header"><div><span class="workspace-label">On this Mac</span><h2>Storage</h2></div><button id="refresh-storage-button" class="quiet-button" type="button">Refresh</button></header>
+          <p id="storage-total" class="storage-total">Checking storage…</p>
+          <div id="storage-areas" class="storage-areas"></div>
+          <section class="storage-projects"><h3>Top cached articles</h3><p>Article totals can overlap when they share cached audio; the total above counts each file once.</p><ol id="storage-project-list"></ol></section>
         </section>
 
         <footer class="player-bar" aria-label="Playback controls">
@@ -178,13 +226,9 @@
         </header>
         <section id="cache-active-item" class="cache-active-item" hidden aria-live="polite"></section>
         <section class="cache-timeline-section" aria-labelledby="cache-queue-title">
-          <h3 id="cache-queue-title">Pending</h3>
+          <h3 id="cache-queue-title">Articles</h3>
           <ol id="cache-queue-list" class="cache-timeline"></ol>
         </section>
-        <details class="cache-ready-group">
-          <summary>Ready <span id="cache-ready-count">0</span></summary>
-          <ol id="cache-ready-list" class="cache-timeline"></ol>
-        </details>
       </aside>
     </div>
     <div id="delete-project-dialog" class="dialog-backdrop" hidden>

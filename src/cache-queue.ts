@@ -13,6 +13,17 @@ export interface CacheTask {
   playbackOrder?: number;
 }
 
+export interface CacheProjectSummary {
+  projectId: string;
+  projectTitle: string;
+  total: number;
+  ready: number;
+  queued: number;
+  caching: number;
+  failed: number;
+  nextTask: CacheTask;
+}
+
 export function cacheTaskId(projectId: string, voice: string, sectionIndex: number, clipIndex: number, text: string): string {
   return JSON.stringify([projectId, voice, sectionIndex, clipIndex, text]);
 }
@@ -31,6 +42,32 @@ export function sectionCacheState(tasks: readonly CacheTask[], projectId: string
   if (sectionTasks.some((task) => task.status === "caching")) return "caching";
   if (sectionTasks.some((task) => task.status === "failed")) return "failed";
   return "queued";
+}
+
+export function summarizeCacheProjects(
+  tasks: readonly CacheTask[],
+  currentProjectId: string,
+  activeSection: number,
+): CacheProjectSummary[] {
+  const prioritized = prioritizeCacheTasks(tasks, currentProjectId, activeSection);
+  const summaries = new Map<string, CacheProjectSummary>();
+  for (const task of prioritized) {
+    const summary = summaries.get(task.projectId) ?? {
+      projectId: task.projectId,
+      projectTitle: task.projectTitle,
+      total: 0,
+      ready: 0,
+      queued: 0,
+      caching: 0,
+      failed: 0,
+      nextTask: task,
+    };
+    summary.total += 1;
+    summary[task.status] += 1;
+    if (summary.nextTask.status === "ready" && task.status !== "ready") summary.nextTask = task;
+    summaries.set(task.projectId, summary);
+  }
+  return [...summaries.values()];
 }
 
 function compareTaskPriority(left: CacheTask, right: CacheTask, currentProjectId: string, activeSection: number): number {

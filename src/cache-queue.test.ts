@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cacheTaskId, prioritizeCacheTasks, sectionCacheState, type CacheTask } from "./cache-queue";
+import { cacheTaskId, prioritizeCacheTasks, sectionCacheState, summarizeCacheProjects, type CacheTask } from "./cache-queue";
 
 function task(overrides: Partial<CacheTask> = {}): CacheTask {
   const base: CacheTask = {
@@ -47,5 +47,16 @@ describe("cache queue", () => {
     const tasks = [task({ id: "failed", status: "failed" }), task({ id: "queued", sectionIndex: 1 })];
     expect(sectionCacheState(tasks, "current", 0)).toBe("failed");
     expect(prioritizeCacheTasks(tasks.filter((item) => item.status === "queued"), "current", 0)[0].id).toBe("queued");
+  });
+
+  test("collapses clips into article rows using the next incomplete task", () => {
+    const summaries = summarizeCacheProjects([
+      task({ id: "ready", status: "ready" }),
+      task({ id: "pending", sectionIndex: 1, status: "queued" }),
+      task({ id: "other", projectId: "other", projectTitle: "Other", status: "caching" }),
+    ], "current", 0);
+    expect(summaries.map(({ projectId }) => projectId)).toEqual(["current", "other"]);
+    expect(summaries[0]).toMatchObject({ total: 2, ready: 1, queued: 1, nextTask: { id: "pending" } });
+    expect(summaries[1]).toMatchObject({ total: 1, caching: 1, nextTask: { id: "other" } });
   });
 });

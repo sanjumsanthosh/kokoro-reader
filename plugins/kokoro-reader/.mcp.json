@@ -6,9 +6,16 @@
       "enabled": true,
       "enabled_tools": [
         "send_to_reader",
+        "send_toon_packet",
+        "send_gmail_digest_toon",
         "send_file_to_reader",
+        "update_reader_project_sections",
         "precheck_reader_files",
+        "precheck_sections",
         "append_to_reader_files",
+        "get_reader_pronunciations",
+        "set_reader_pronunciations",
+        "remove_reader_pronunciations",
         "list_reader_projects",
         "get_reader_project_location",
         "delete_reader_project"

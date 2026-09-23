@@ -1,7 +1,7 @@
 interface:
   display_name: "Kokoro Reader"
   short_description: "Format rich material and send it to the local reader"
-  default_prompt: "Use $kokoro-format-and-send to teach this from scratch. Assume no prior knowledge; build slowly from the real-world problem to the technical details; use simple visual block diagrams and pause-and-predict self-checks; read each self-check question aloud before the answer; then send it to Kokoro Reader."
+  default_prompt: "Use $kokoro-format-and-send to create eye-trackable teaching cards with natural custom narration. Every visible idea, diagram caption, connection, self-check, and answer must have a matching spoken thought in the same order, but narration must explain rather than recite: never read Markdown, tables, code fences, diff markers, paths, or raw identifiers. For executable code, narrate one semantic group at a time with an inclusive spoken line range; do not inventory braces, imports, declarations, or formatting-only lines. Carry one concrete example from input through each state change to output and its next consumer. Keep code identifiers visible but say them as ordinary words in narration, including expanding glued names such as MoneyControl into Money Control. Run precheck before every send and make up to three targeted repairs while diagnostics improve. Fix genuine findings; override only verified false-positive or non-material advisory findings with the current token, a concrete reason, and semantic-coverage checks, then disclose the acknowledged findings in the final response."
 
 policy:
   allow_implicit_invocation: true

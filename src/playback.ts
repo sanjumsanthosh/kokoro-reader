@@ -7,6 +7,17 @@ export interface PlaybackPosition {
   clipId: string;
 }
 
+export interface ArticleTimingItem {
+  id: string;
+  duration: number | null;
+}
+
+export interface ArticleTiming {
+  total: number | null;
+  elapsed: number;
+  remaining: number;
+}
+
 export type ReaderShortcut = "toggle" | "restart-section" | "next-section" | "previous-section" | "restart-document" | "jump-to-marker" | "rewind" | "forward";
 
 const READER_SHORTCUTS: Record<string, ReaderShortcut> = {
@@ -45,4 +56,29 @@ export function sectionPlaybackProgress(clipIndex: number, clipCount: number, cu
   if (clipCount <= 0) return 0;
   const clipProgress = duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0;
   return Math.min(1, Math.max(0, (clipIndex + clipProgress) / clipCount));
+}
+
+export function articleTiming(
+  items: readonly ArticleTimingItem[],
+  clipId: string | null,
+  currentTime: number,
+  speed: number,
+): ArticleTiming {
+  if (items.some((item) => item.duration === null || !Number.isFinite(item.duration) || item.duration < 0)) {
+    return { total: null, elapsed: 0, remaining: 0 };
+  }
+  const total = items.reduce((sum, item) => sum + item.duration!, 0);
+  const clipIndex = clipId ? items.findIndex((item) => item.id === clipId) : -1;
+  const elapsedAtOneX = clipIndex < 0
+    ? 0
+    : items.slice(0, clipIndex).reduce((sum, item) => sum + item.duration!, 0)
+      + Math.min(Math.max(Number.isFinite(currentTime) ? currentTime : 0, 0), items[clipIndex].duration!);
+  const playbackSpeed = Number.isFinite(speed) && speed > 0 ? speed : 1;
+  const elapsed = elapsedAtOneX / playbackSpeed;
+  const adjustedTotal = total / playbackSpeed;
+  return {
+    total: adjustedTotal,
+    elapsed: Math.min(adjustedTotal, elapsed),
+    remaining: Math.max(0, adjustedTotal - elapsed),
+  };
 }

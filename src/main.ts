@@ -1,17 +1,23 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { Menu } from "@tauri-apps/api/menu";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import katex from "katex";
 import MarkdownIt from "markdown-it";
 import "katex/dist/katex.min.css";
 import "./styles.css";
-import { cacheTaskId, prioritizeCacheTasks, sectionCacheState, type CacheTask, type CacheTaskStatus } from "./cache-queue";
-import { parsePlaybackPosition, readerShortcut, sectionPlaybackProgress, type PlaybackPosition } from "./playback";
-import { deriveSpeechText, groupSpeechChunks, reconcileSections, splitMarkdownSections } from "./text";
+import { cacheTaskId, prioritizeCacheTasks, sectionCacheState, summarizeCacheProjects, type CacheTask, type CacheTaskStatus } from "./cache-queue";
+import { articleTiming, parsePlaybackPosition, readerShortcut, sectionPlaybackProgress, type PlaybackPosition } from "./playback";
+import { bestMarkdownPassage, deriveSpeechText, groupSpeechChunks, literalTextMatches, narrationHighlights, reconcileSections, speechChunkRanges, splitMarkdownSections, type TextMatch } from "./text";
 
 type SpeechMode = "automatic" | "custom";
 type Theme = "light" | "dark";
+type ArticleTimerMode = "elapsed" | "remaining";
 type CacheState = CacheTaskStatus;
+type ViewMode = "listen" | "edit" | "articles" | "storage";
+type ArticleFilter = "all" | "read" | "unread";
+type ArticleSort = "created_at" | "read_at";
 
 interface DocumentSection {
   markdown: string;
@@ -28,20 +34,68 @@ interface ProjectSummary {
   project_id: string;
   title: string;
   updated_at: number;
+  created_at: number;
   active: boolean;
   read: boolean;
+  read_at: number | null;
 }
 
 interface ProjectMetadata {
   read: boolean;
+  created_at: number | null;
+  read_at: number | null;
   codex_url: string | null;
+}
+
+interface StorageArea { path: string; bytes: number; exists: boolean; }
+interface ProjectCacheUsage { project_id: string; title: string; bytes: number; cached_clips: number; }
+interface StorageStats {
+  total_bytes: number;
+  models: StorageArea;
+  audio_cache: StorageArea;
+  project_files: StorageArea;
+  app_data: StorageArea;
+  projects: ProjectCacheUsage[];
 }
 
 interface ProjectDocument {
   project_id: string;
   document: Document;
   metadata: ProjectMetadata;
+  revision: string;
 }
+
+interface TextRange { start_utf16: number; end_utf16: number; }
+interface SectionDiagnostic {
+  code: string;
+  severity: "error" | "warning";
+  message: string;
+  source_range: TextRange | null;
+  narration_range: TextRange | null;
+}
+interface CoverageBlockResult {
+  kind: string;
+  label: string;
+  source_range: TextRange;
+  narration_range: TextRange | null;
+  shared_terms: string[];
+  missing_terms: string[];
+  covered: boolean;
+}
+interface SectionPrecheckResult {
+  section_index: number;
+  spoken_grounding: number;
+  visual_coverage: number;
+  shared_terms: number;
+  visual_terms: number;
+  narration_terms: number;
+  required_visual_shared_terms: number;
+  required_grounded_shared_terms: number;
+  diagnostics: SectionDiagnostic[];
+  coverage_blocks: CoverageBlockResult[];
+  ready: boolean;
+}
+interface SectionsPrecheckResult { sections: SectionPrecheckResult[]; ready_for_send: boolean; }
 
 interface RuntimeStatus {
   model_ready: boolean;
@@ -66,6 +120,7 @@ interface AudioAsset {
 
 interface QueueTask extends CacheTask {
   asset?: AudioAsset;
+  duration?: number;
   error?: string;
   waiters: Array<{ resolve: (asset: AudioAsset) => void; reject: (error: Error) => void; playbackToken?: number }>;
 }
@@ -102,6 +157,7 @@ interface Preferences {
   voice: string;
   speed: number;
   textScale: number;
+  articleTimerMode: ArticleTimerMode;
 }
 
 const markdown = new MarkdownIt({
@@ -147,19 +203,44 @@ const closeCachePanelButton = required<HTMLButtonElement>("#close-cache-panel-bu
 const cachePanelSummary = required<HTMLElement>("#cache-panel-summary");
 const cacheActiveItem = required<HTMLElement>("#cache-active-item");
 const cacheQueueList = required<HTMLOListElement>("#cache-queue-list");
-const cacheReadyCount = required<HTMLElement>("#cache-ready-count");
-const cacheReadyList = required<HTMLOListElement>("#cache-ready-list");
 const themeToggle = required<HTMLButtonElement>("#theme-toggle");
 const listenModeButton = required<HTMLButtonElement>("#listen-mode-button");
 const editModeButton = required<HTMLButtonElement>("#edit-mode-button");
+const articlesModeButton = required<HTMLButtonElement>("#articles-mode-button");
+const storageModeButton = required<HTMLButtonElement>("#storage-mode-button");
 const sectionSummary = required<HTMLElement>("#section-summary");
+const workspaceToolbar = required<HTMLElement>(".workspace-toolbar");
+const articleTimer = required<HTMLButtonElement>("#article-timer");
+const articleTimerValue = required<HTMLElement>("#article-timer-value");
+const searchButton = required<HTMLButtonElement>("#search-button");
 const listenPane = required<HTMLElement>("#listen-pane");
+const searchBar = required<HTMLElement>("#search-bar");
+const searchInput = required<HTMLInputElement>("#search-input");
+const searchResultCount = required<HTMLElement>("#search-result-count");
+const searchPreviousButton = required<HTMLButtonElement>("#search-previous-button");
+const searchNextButton = required<HTMLButtonElement>("#search-next-button");
+const searchCloseButton = required<HTMLButtonElement>("#search-close-button");
 const editPane = required<HTMLElement>("#edit-pane");
+const articlesPane = required<HTMLElement>("#articles-pane");
+const storagePane = required<HTMLElement>("#storage-pane");
+const articlesFilter = required<HTMLSelectElement>("#articles-filter");
+const articlesSelectAll = required<HTMLInputElement>("#articles-select-all");
+const articlesTableBody = required<HTMLTableSectionElement>("#articles-table-body");
+const deleteSelectedButton = required<HTMLButtonElement>("#delete-selected-button");
+const refreshStorageButton = required<HTMLButtonElement>("#refresh-storage-button");
+const storageTotal = required<HTMLElement>("#storage-total");
+const storageAreas = required<HTMLElement>("#storage-areas");
+const storageProjectList = required<HTMLOListElement>("#storage-project-list");
 const sectionNavigator = required<HTMLElement>("#section-navigator");
 const sectionNavigatorList = required<HTMLElement>("#section-navigator-list");
 const markdownView = required<HTMLElement>("#markdown-view");
 const markdownEditor = required<HTMLTextAreaElement>("#markdown-editor");
 const narrationEditor = required<HTMLElement>("#narration-editor");
+const alignmentStatus = required<HTMLElement>("#alignment-status");
+const diagnosticsPanel = required<HTMLElement>("#diagnostics-panel");
+const draftConflict = required<HTMLElement>("#draft-conflict");
+const reloadDiskButton = required<HTMLButtonElement>("#reload-disk-button");
+const keepEditsButton = required<HTMLButtonElement>("#keep-edits-button");
 const playButton = required<HTMLButtonElement>("#play-button");
 const stopButton = required<HTMLButtonElement>("#stop-button");
 const voiceSelect = required<HTMLSelectElement>("#voice-select");
@@ -167,12 +248,14 @@ const speedSlider = required<HTMLInputElement>("#speed-slider");
 const speedValue = required<HTMLOutputElement>("#speed-value");
 const speedPresetButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".speed-preset"));
 const activityStatus = required<HTMLElement>("#activity-status");
+const playerBar = required<HTMLElement>(".player-bar");
 const audioPlayer = required<HTMLAudioElement>("#audio-player");
 
 let currentProjectId = "";
+let currentRevision = "";
 let projects: ProjectSummary[] = [];
 let currentDocument: Document = { title: "", sections: [] };
-let currentMetadata: ProjectMetadata = { read: false, codex_url: null };
+let currentMetadata: ProjectMetadata = { read: false, created_at: null, read_at: null, codex_url: null };
 let runtimeStatus: RuntimeStatus = {
   model_ready: false,
   engine_ready: false,
@@ -181,12 +264,18 @@ let runtimeStatus: RuntimeStatus = {
   backend: null,
   error: null,
 };
-let mode: "listen" | "edit" = "listen";
+let mode: ViewMode = "listen";
 let activeSection = 0;
 let playbackToken = 0;
 let playbackPosition: PlaybackPosition | null = null;
 let currentPlayback: PlaybackContext | null = null;
 let saveTimer: number | undefined;
+let saveInFlight = false;
+let editorDirty = false;
+let pendingExternalRevision = "";
+let validationTimer: number | undefined;
+let validationGeneration = 0;
+let sectionDiagnostics: SectionPrecheckResult[] = [];
 let isPlaying = false;
 let hasPrevious = false;
 let preferences = loadPreferences();
@@ -197,6 +286,17 @@ let cacheQueueWorkerRunning = false;
 let cacheQueueBuilding = false;
 let activeCacheTaskId = "";
 let cachePanelOpen = false;
+let searchQuery = "";
+let searchActiveIndex = 0;
+let searchMatchGroups: HTMLElement[][] = [];
+let searchReturnFocus: HTMLElement | null = null;
+let storageStats: StorageStats | null = null;
+let articleFilter: ArticleFilter = "all";
+let articleSort: ArticleSort = "created_at";
+let articleSortDescending = true;
+const selectedArticleIds = new Set<string>();
+let editTarget: { sectionIndex: number; clipIndex: number } | null = null;
+let pendingDeleteProjectIds: string[] = [];
 
 function loadPreferences(): Preferences {
   const defaults: Preferences = {
@@ -204,6 +304,7 @@ function loadPreferences(): Preferences {
     voice: DEFAULT_VOICE,
     speed: 1,
     textScale: DEFAULT_TEXT_SCALE,
+    articleTimerMode: "elapsed",
   };
   try {
     const stored = window.localStorage.getItem(PREFERENCES_KEY);
@@ -221,6 +322,9 @@ function loadPreferences(): Preferences {
         && values.textScale >= MIN_TEXT_SCALE && values.textScale <= MAX_TEXT_SCALE
         ? Math.round(values.textScale * 10) / 10
         : defaults.textScale,
+      articleTimerMode: values.articleTimerMode === "elapsed" || values.articleTimerMode === "remaining"
+        ? values.articleTimerMode
+        : defaults.articleTimerMode,
     };
   } catch (error) {
     console.warn("Unable to load saved reader preferences", error);
@@ -312,7 +416,14 @@ function setSpeed(value: number, persist = true): void {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
+  renderArticleTimer();
   if (persist) savePreferences();
+}
+
+function toggleArticleTimer(): void {
+  preferences.articleTimerMode = preferences.articleTimerMode === "elapsed" ? "remaining" : "elapsed";
+  savePreferences();
+  renderArticleTimer();
 }
 
 function applyPlaybackSpeed(): void {
@@ -386,6 +497,7 @@ async function rebuildCacheQueue(generation: number): Promise<void> {
             status: existing?.status === "failed" || existing?.status === "caching" ? existing.status : "queued",
             playbackOrder: existing?.playbackOrder,
             asset: existing?.asset,
+            duration: existing?.duration,
             error: existing?.error,
             waiters: existing?.waiters ?? [],
           });
@@ -400,27 +512,31 @@ async function rebuildCacheQueue(generation: number): Promise<void> {
 
     const statuses = await Promise.all(projectDocuments.map(async (project) => {
       const tasks = next.filter((task) => task.projectId === project.project_id);
-      if (!tasks.length) return { projectId: project.project_id, tasks, cached: [] as boolean[], error: "" };
+      if (!tasks.length) return { projectId: project.project_id, tasks, durations: [] as Array<number | null>, error: "" };
       try {
         return {
           projectId: project.project_id,
           tasks,
-          cached: await invoke<boolean[]>("audio_cache_status", { projectId: project.project_id, texts: tasks.map((task) => task.text), voice }),
+          durations: await invoke<Array<number | null>>("audio_cache_status", { projectId: project.project_id, texts: tasks.map((task) => task.text), voice }),
           error: "",
         };
       } catch (error) {
-        return { projectId: project.project_id, tasks, cached: [] as boolean[], error: String(error) };
+        return { projectId: project.project_id, tasks, durations: [] as Array<number | null>, error: String(error) };
       }
     }));
     if (generation !== cacheQueueBuildGeneration) return;
-    statuses.forEach(({ tasks, cached, error }) => {
+    statuses.forEach(({ tasks, durations, error }) => {
       tasks.forEach((task, index) => {
-        if (cached[index]) {
+        const duration = durations[index];
+        if (typeof duration === "number" && Number.isFinite(duration) && duration >= 0) {
           task.status = "ready";
+          task.duration = duration / 1000;
           task.error = undefined;
         } else if (error) {
           task.status = "failed";
           task.error = error;
+        } else {
+          task.duration = undefined;
         }
       });
     });
@@ -464,6 +580,7 @@ async function runCacheQueueWorker(): Promise<void> {
         if (current) {
           current.status = "ready";
           current.asset = asset;
+          current.duration = asset.duration_ms / 1000;
           current.error = undefined;
           current.waiters.splice(0).forEach(({ resolve }) => resolve(asset));
           notifyCacheStatus(`Cached ${queueTaskCount("ready")} of ${cacheQueue.length}`);
@@ -486,7 +603,10 @@ async function runCacheQueueWorker(): Promise<void> {
   } finally {
     cacheQueueWorkerRunning = false;
     if (cacheQueue.some((task) => task.status === "queued")) void runCacheQueueWorker();
-    else if (!isPlaying && cacheQueue.length && !queueTaskCount("failed")) setStatus("Audio queue ready");
+    else {
+      if (!isPlaying && cacheQueue.length && !queueTaskCount("failed")) setStatus("Audio queue ready");
+      if (mode === "articles" || mode === "storage") void refreshStorageStats();
+    }
   }
 }
 
@@ -530,28 +650,28 @@ function setStatus(message: string): void {
   activityStatus.textContent = message;
 }
 
-function cacheTaskStateLabel(task: QueueTask): string {
-  if (task.status === "caching") return "Caching now";
-  if (task.status === "ready") return "Ready";
-  if (task.status === "failed") return task.error ? `Failed: ${task.error}` : "Failed";
-  return "Queued";
-}
-
-function renderCacheTask(list: HTMLOListElement, task: QueueTask): void {
+function renderCacheProject(list: HTMLOListElement, summary: ReturnType<typeof summarizeCacheProjects>[number]): void {
   const row = document.createElement("li");
-  row.className = `cache-task ${task.status}`;
+  const state = summary.caching ? "caching" : summary.failed ? "failed" : summary.ready === summary.total ? "ready" : "queued";
+  row.className = `cache-task ${state}`;
   const main = document.createElement("button");
   main.type = "button";
   main.className = "cache-task-main";
-  main.innerHTML = `<span class="cache-task-meta">${escapeHtml(task.projectTitle)} · Section ${task.sectionIndex + 1} · Clip ${task.clipIndex + 1}</span><span class="cache-task-preview">${escapeHtml(task.text)}</span><span class="cache-task-state">${escapeHtml(cacheTaskStateLabel(task))}</span>`;
-  main.addEventListener("click", () => void navigateToCacheTask(task));
+  const parts = [`${summary.ready}/${summary.total} cached`];
+  if (summary.caching) parts.push("caching");
+  if (summary.queued) parts.push(`${summary.queued} pending`);
+  if (summary.failed) parts.push(`${summary.failed} failed`);
+  main.innerHTML = `<span class="cache-task-preview">${escapeHtml(summary.projectTitle)}</span><span class="cache-task-state">${parts.join(" · ")}</span>`;
+  main.addEventListener("click", () => void navigateToCacheTask(summary.nextTask as QueueTask));
   row.appendChild(main);
-  if (task.status === "failed") {
+  if (summary.failed) {
     const retry = document.createElement("button");
     retry.type = "button";
     retry.className = "cache-retry-button";
-    retry.textContent = "Retry";
-    retry.addEventListener("click", () => retryCacheTask(task.id));
+    retry.textContent = "Retry failed";
+    retry.addEventListener("click", () => {
+      cacheQueue.filter((task) => task.projectId === summary.projectId && task.status === "failed").forEach((task) => retryCacheTask(task.id));
+    });
     row.appendChild(retry);
   }
   list.appendChild(row);
@@ -561,20 +681,19 @@ function renderCacheQueue(): void {
   const ready = queueTaskCount("ready");
   const failed = queueTaskCount("failed");
   const caching = queueTaskCount("caching");
-  cachePanelCount.textContent = `${ready}/${cacheQueue.length}`;
+  const summaries = summarizeCacheProjects(cacheQueue, currentProjectId, activeSection);
+  const complete = summaries.filter((summary) => summary.ready === summary.total).length;
+  cachePanelCount.textContent = `${complete}/${summaries.length}`;
   cachePanelSummary.textContent = cacheQueue.length
-    ? `${ready} ready · ${caching ? `${caching} caching · ` : ""}${queueTaskCount("queued")} queued${failed ? ` · ${failed} failed` : ""}`
+    ? `${ready}/${cacheQueue.length} clips ready${caching ? ` · ${caching} caching` : ""}${queueTaskCount("queued") ? ` · ${queueTaskCount("queued")} pending` : ""}${failed ? ` · ${failed} failed` : ""}`
     : "No audio to cache";
-  cachePanelDot.className = `status-dot ${failed ? "error" : ready === cacheQueue.length && cacheQueue.length ? "ready" : "busy"}`;
+  cachePanelDot.className = `status-dot ${failed ? "error" : complete === summaries.length && summaries.length ? "ready" : "busy"}`;
   const active = cacheQueue.find((task) => task.id === activeCacheTaskId);
   cacheActiveItem.hidden = !active;
   cacheActiveItem.textContent = active ? `Caching now · ${active.projectTitle} · Section ${active.sectionIndex + 1} · ${active.text}` : "";
   cacheQueueList.replaceChildren();
-  cacheReadyList.replaceChildren();
-  cacheReadyCount.textContent = String(ready);
-  prioritizedQueueTasks().forEach((task) => {
-    renderCacheTask(task.status === "ready" ? cacheReadyList : cacheQueueList, task);
-  });
+  summaries.forEach((summary) => renderCacheProject(cacheQueueList, summary));
+  renderArticleTimer();
 }
 
 function openCachePanel(): void {
@@ -609,8 +728,14 @@ async function navigateToCacheTask(task: QueueTask): Promise<void> {
 }
 
 function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function formatDate(timestamp: number | null): string {
+  return timestamp ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(timestamp * 1000)) : "—";
 }
 
 function escapeHtml(value: string): string {
@@ -624,6 +749,238 @@ function escapeHtml(value: string): string {
     };
     return entities[character];
   });
+}
+
+function formatArticleTime(seconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainder = totalSeconds % 60;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+function renderArticleTimer(): void {
+  const hasArticle = Boolean(currentProjectId && currentDocument.sections.length);
+  articleTimer.disabled = !hasArticle;
+  if (!hasArticle) {
+    articleTimerValue.textContent = "—";
+    articleTimer.setAttribute("aria-pressed", "false");
+    articleTimer.title = "Article timer unavailable";
+    articleTimer.setAttribute("aria-label", "Article timer unavailable");
+    return;
+  }
+
+  const items = cacheQueue
+    .filter((task) => task.projectId === currentProjectId && task.voice === selectedVoice())
+    .sort((left, right) => left.sectionIndex - right.sectionIndex || left.clipIndex - right.clipIndex)
+    .map((task) => ({
+      id: task.id,
+      duration: task.status === "ready" && task.duration !== undefined ? task.duration : null,
+    }));
+  const expectedClipCount = currentDocument.sections.reduce((count, section) => count + groupSpeechChunks(section.speech_text).length, 0);
+  const position = playbackPosition?.voice === selectedVoice() ? playbackPosition : null;
+  const timing = items.length === expectedClipCount
+    ? articleTiming(items, position?.clipId ?? null, position?.currentTime ?? 0, preferences.speed)
+    : { total: null, elapsed: 0, remaining: 0 };
+
+  if (timing.total === null) {
+    articleTimerValue.textContent = "Calculating…";
+    articleTimer.setAttribute("aria-pressed", String(preferences.articleTimerMode === "remaining"));
+    articleTimer.title = "Calculating article timing from cached audio";
+    articleTimer.setAttribute("aria-label", "Article timing is being calculated");
+    return;
+  }
+
+  const showingRemaining = preferences.articleTimerMode === "remaining";
+  const primary = showingRemaining ? timing.remaining : timing.elapsed;
+  articleTimerValue.textContent = `${formatArticleTime(primary)} / ${formatArticleTime(timing.total)}`;
+  articleTimer.setAttribute("aria-pressed", String(showingRemaining));
+  const nextMode = showingRemaining ? "elapsed" : "remaining";
+  articleTimer.title = showingRemaining ? "Showing time remaining; click to show time covered" : "Showing time covered; click to show time remaining";
+  articleTimer.setAttribute("aria-label", `${showingRemaining ? "Time remaining" : "Time covered"} ${formatArticleTime(primary)} of ${formatArticleTime(timing.total)}. Click to show ${nextMode} time`);
+}
+
+interface TextNodeRange {
+  node: Text;
+  start: number;
+  end: number;
+}
+
+function collectTextNodes(element: HTMLElement): TextNodeRange[] {
+  const nodes: TextNodeRange[] = [];
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  let current: Node | null;
+  while ((current = walker.nextNode())) {
+    const node = current as Text;
+    const parent = node.parentElement;
+    if (!parent || parent.closest(".section-play-button, .cache-indicator, .playback-marker, mark, .katex-mathml, [hidden], [aria-hidden='true']")) continue;
+    if (!node.data) continue;
+    nodes.push({ node, start: offset, end: offset + node.data.length });
+    offset += node.data.length;
+  }
+  return nodes;
+}
+
+function highlightTextRanges(nodes: TextNodeRange[], ranges: TextMatch[], className: string, onMark?: (mark: HTMLElement, rangeIndex: number) => void): void {
+  nodes.forEach(({ node, start: nodeStart, end: nodeEnd }) => {
+    const overlaps = ranges
+      .map((range, index) => ({ range, index }))
+      .filter(({ range }) => range.start < nodeEnd && range.end > nodeStart);
+    if (!overlaps.length) return;
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    overlaps.forEach(({ range, index }) => {
+      const start = Math.max(range.start, nodeStart) - nodeStart;
+      const end = Math.min(range.end, nodeEnd) - nodeStart;
+      if (start > cursor) fragment.appendChild(document.createTextNode(node.data.slice(cursor, start)));
+      const mark = document.createElement("mark");
+      mark.className = className;
+      mark.textContent = node.data.slice(start, end);
+      fragment.appendChild(mark);
+      onMark?.(mark, index);
+      cursor = end;
+    });
+    if (cursor < node.data.length) fragment.appendChild(document.createTextNode(node.data.slice(cursor)));
+    node.replaceWith(fragment);
+  });
+}
+
+function clearSearchHighlights(): void {
+  markdownView.querySelectorAll<HTMLElement>("mark.search-match").forEach((mark) => {
+    mark.replaceWith(document.createTextNode(mark.textContent ?? ""));
+  });
+  markdownView.normalize();
+  searchMatchGroups = [];
+}
+
+function clearNarrationHighlights(): void {
+  markdownView.querySelectorAll<HTMLElement>("mark.narration-match").forEach((mark) => {
+    mark.replaceWith(document.createTextNode(mark.textContent ?? ""));
+  });
+  markdownView.normalize();
+}
+
+function highlightNarrationTerms(element: HTMLElement, terms: string[]): void {
+  const expression = new RegExp(`\\b(${terms.map((term) => term.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")).join("|")})\\b`, "giu");
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  let current: Node | null;
+  while ((current = walker.nextNode())) {
+    const node = current as Text;
+    if (node.parentElement?.closest("mark, .section-play-button, .cache-indicator, .playback-marker")) continue;
+    nodes.push(node);
+  }
+  nodes.forEach((node) => {
+    expression.lastIndex = 0;
+    if (!expression.test(node.data)) return;
+    expression.lastIndex = 0;
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    for (const match of node.data.matchAll(expression)) {
+      const start = match.index ?? 0;
+      if (start > cursor) fragment.appendChild(document.createTextNode(node.data.slice(cursor, start)));
+      const mark = document.createElement("mark");
+      mark.className = "narration-match";
+      mark.textContent = match[0];
+      fragment.appendChild(mark);
+      cursor = start + match[0].length;
+    }
+    if (cursor < node.data.length) fragment.appendChild(document.createTextNode(node.data.slice(cursor)));
+    node.replaceWith(fragment);
+  });
+}
+
+function renderNarrationHighlights(): void {
+  clearNarrationHighlights();
+  if (!searchBar.hidden) return;
+  const isSavedPositionInActiveSection = playbackPosition?.sectionIndex === activeSection;
+  const clipIndex = isSavedPositionInActiveSection ? playbackPosition!.clipIndex : 0;
+  const section = markdownView.querySelector<HTMLElement>(`.document-section[data-section-index="${activeSection}"]`);
+  const speech = groupSpeechChunks(currentDocument.sections[activeSection]?.speech_text ?? "")[clipIndex];
+  if (!section || !speech) return;
+  const blocks = Array.from(section.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6, p, li, blockquote, pre"));
+  const blockNodes = blocks.map((block) => collectTextNodes(block));
+  narrationHighlights(blockNodes.map((nodes) => nodes.map(({ node }) => node.data).join("")), speech).forEach((match) => {
+    if (match.mode === "exact") highlightTextRanges(blockNodes[match.blockIndex], match.ranges, "narration-match");
+    else highlightNarrationTerms(blocks[match.blockIndex], match.terms);
+  });
+}
+
+function updateSearchResultUi(scrollToActive = false): void {
+  const count = searchMatchGroups.length;
+  if (!count) {
+    searchActiveIndex = 0;
+    searchResultCount.textContent = searchQuery ? "No matches" : "0/0";
+    searchResultCount.setAttribute("aria-label", searchQuery ? "No matches" : "No search results");
+    return;
+  }
+
+  searchActiveIndex = Math.min(searchActiveIndex, count - 1);
+  searchMatchGroups.forEach((group, index) => {
+    group.forEach((mark) => mark.classList.toggle("active", index === searchActiveIndex));
+  });
+  searchResultCount.textContent = `${searchActiveIndex + 1}/${count}`;
+  searchResultCount.setAttribute("aria-label", `Search result ${searchActiveIndex + 1} of ${count}`);
+  if (scrollToActive) {
+    searchMatchGroups[searchActiveIndex][0]?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+}
+
+function renderSearchHighlights(scrollToActive = false): void {
+  clearNarrationHighlights();
+  clearSearchHighlights();
+  if (searchBar.hidden || !searchQuery) {
+    updateSearchResultUi();
+    return;
+  }
+
+  markdownView.querySelectorAll<HTMLElement>(".document-section").forEach((section) => {
+    const nodes = collectTextNodes(section);
+    const source = nodes.map(({ node }) => node.data).join("");
+    const matches = literalTextMatches(source, searchQuery);
+    matches.forEach(() => searchMatchGroups.push([]));
+    const groupStart = searchMatchGroups.length - matches.length;
+    highlightTextRanges(nodes, matches, "search-match", (mark, index) => {
+      mark.dataset.searchIndex = String(groupStart + index);
+      searchMatchGroups[groupStart + index].push(mark);
+    });
+  });
+  updateSearchResultUi(scrollToActive);
+}
+
+function navigateSearch(direction: 1 | -1): void {
+  if (!searchMatchGroups.length) return;
+  searchActiveIndex = (searchActiveIndex + direction + searchMatchGroups.length) % searchMatchGroups.length;
+  updateSearchResultUi(true);
+}
+
+function openSearch(): void {
+  if (!currentDocument.sections.length) return;
+  if (searchBar.hidden) {
+    searchReturnFocus = mode === "edit"
+      ? searchButton
+      : document.activeElement instanceof HTMLElement ? document.activeElement : searchButton;
+    if (mode === "edit") updateMode("listen");
+    searchBar.hidden = false;
+    searchButton.setAttribute("aria-expanded", "true");
+  }
+  renderSearchHighlights(true);
+  searchInput.focus();
+  searchInput.select();
+}
+
+function closeSearch(): void {
+  searchBar.hidden = true;
+  searchButton.setAttribute("aria-expanded", "false");
+  clearSearchHighlights();
+  updateSearchResultUi();
+  renderNarrationHighlights();
+  const returnFocus = searchReturnFocus;
+  searchReturnFocus = null;
+  if (returnFocus?.isConnected) returnFocus.focus();
 }
 
 function renderMarkdown(source: string): string {
@@ -753,11 +1110,20 @@ function renderSectionNavigator(): void {
 }
 
 function updatePlaybackVisuals(): void {
+  renderArticleTimer();
   markdownView.querySelectorAll<HTMLElement>(".document-section").forEach((section) => {
     const index = Number(section.dataset.sectionIndex);
     const active = index === activeSection;
     section.classList.toggle("active", active);
-    section.setAttribute("aria-pressed", String(active));
+    const sectionPlayButton = section.querySelector<HTMLButtonElement>(".section-play-button");
+    const playing = active && isPlaying && !audioPlayer.paused;
+    if (sectionPlayButton) {
+      sectionPlayButton.classList.toggle("playing", playing);
+      sectionPlayButton.setAttribute("aria-label", `${playing ? "Pause" : "Play"} section ${index + 1}`);
+      sectionPlayButton.title = `${playing ? "Pause" : "Play"} section ${index + 1}`;
+      const icon = sectionPlayButton.querySelector<SVGPathElement>("path");
+      icon?.setAttribute("d", playing ? "M6 5h3v10H6zM11 5h3v10h-3z" : "m7 4 9 6-9 6V4Z");
+    }
     const marker = section.querySelector<HTMLElement>(".playback-marker");
     const showMarker = active && playbackPosition?.sectionIndex === index;
     if (marker) {
@@ -771,11 +1137,13 @@ function updatePlaybackVisuals(): void {
   const focusIndex = sectionNavigator.dataset.focusIndex;
   setNavigatorFocus(focusIndex === undefined ? null : Number(focusIndex));
   sectionNavigator.setAttribute("aria-label", `Document sections. Current section ${activeSection + 1} of ${currentDocument.sections.length}`);
+  renderNarrationHighlights();
 }
 
 function renderListenView(): void {
   markdownView.innerHTML = "";
   sectionSummary.textContent = `${currentDocument.sections.length} section${currentDocument.sections.length === 1 ? "" : "s"}`;
+  renderArticleTimer();
   renderSectionNavigator();
   if (!currentDocument.sections.length) {
     const empty = document.createElement("div");
@@ -788,6 +1156,7 @@ function renderListenView(): void {
         <p>${noProjects ? "Send content from Codex to create the next isolated project." : "Open Edit and paste Markdown to create a document for Kokoro."}</p>
       </div>`;
     markdownView.appendChild(empty);
+    renderSearchHighlights();
     return;
   }
   currentDocument.sections.forEach((section, index) => {
@@ -795,11 +1164,18 @@ function renderListenView(): void {
     const cacheState = currentSectionCacheState(index);
     sectionElement.className = `document-section${index === activeSection ? " active" : ""}`;
     sectionElement.dataset.sectionIndex = String(index);
-    sectionElement.tabIndex = 0;
-    sectionElement.setAttribute("role", "button");
-    sectionElement.setAttribute("aria-pressed", String(index === activeSection));
-    sectionElement.setAttribute("aria-label", `Read section ${index + 1}; ${cacheStateLabel(cacheState)}`);
     sectionElement.innerHTML = renderMarkdown(section.markdown);
+    const sectionPlayButton = document.createElement("button");
+    sectionPlayButton.type = "button";
+    sectionPlayButton.className = "section-play-button";
+    sectionPlayButton.setAttribute("aria-label", `Play section ${index + 1}`);
+    sectionPlayButton.title = `Play section ${index + 1}`;
+    sectionPlayButton.innerHTML = `<svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 9 6-9 6V4Z" /></svg>`;
+    sectionPlayButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      activateSection(index);
+    });
+    sectionElement.appendChild(sectionPlayButton);
     const cacheIndicator = document.createElement("span");
     cacheIndicator.className = `cache-indicator ${cacheState}`;
     cacheIndicator.setAttribute("role", "img");
@@ -821,18 +1197,11 @@ function renderListenView(): void {
         }
         return;
       }
-      activateSection(index);
-    });
-    sectionElement.addEventListener("keydown", (event) => {
-      if ((event.target as Element).closest("a[href]")) return;
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        activateSection(index);
-      }
     });
     markdownView.appendChild(sectionElement);
   });
   updatePlaybackVisuals();
+  renderSearchHighlights();
 }
 
 function renderNarrationEditor(): void {
@@ -854,11 +1223,14 @@ function renderNarrationEditor(): void {
     textarea.value = section.speech_text;
     textarea.dataset.sectionIndex = String(index);
     textarea.addEventListener("input", () => {
+      clearEditTarget();
+      editorDirty = true;
       section.speech_text = textarea.value;
       section.speech_mode = "custom";
       clearPlaybackPosition(currentProjectId);
       invalidateCurrentProjectQueue();
       scheduleSave();
+      scheduleValidation();
       renderListenView();
       scheduleCacheQueueRebuild();
     });
@@ -875,6 +1247,8 @@ function renderNarrationEditor(): void {
       renderNarrationEditor();
       renderListenView();
       scheduleSave();
+      editorDirty = true;
+      scheduleValidation();
       scheduleCacheQueueRebuild();
     });
     wrapper.append(header, textarea, reset);
@@ -883,8 +1257,9 @@ function renderNarrationEditor(): void {
 }
 
 function renderEditors(): void {
-  markdownEditor.value = currentDocument.sections.map((section) => section.markdown).join("\n\n");
+  markdownEditor.value = currentDocument.sections.map((section) => section.markdown).join("\n\n<!-- kokoro-reader-section -->\n\n");
   renderNarrationEditor();
+  scheduleValidation();
 }
 
 function projectLabel(project: ProjectSummary): string {
@@ -917,44 +1292,153 @@ function renderProjectPicker(): void {
   renderProjectMetadata();
 }
 
+function articleRows(): ProjectSummary[] {
+  return projects
+    .filter((project) => articleFilter === "all" || (articleFilter === "read" ? project.read : !project.read))
+    .sort((left, right) => {
+      const leftValue = articleSort === "created_at" ? left.created_at : left.read_at ?? -1;
+      const rightValue = articleSort === "created_at" ? right.created_at : right.read_at ?? -1;
+      return (leftValue - rightValue) * (articleSortDescending ? -1 : 1);
+    });
+}
+
+function projectCacheUsage(projectId: string): ProjectCacheUsage | undefined {
+  return storageStats?.projects.find((usage) => usage.project_id === projectId);
+}
+
+function renderArticles(): void {
+  const rows = articleRows();
+  articlesTableBody.replaceChildren();
+  articlesSelectAll.checked = rows.length > 0 && rows.every((project) => selectedArticleIds.has(project.project_id));
+  articlesSelectAll.indeterminate = rows.some((project) => selectedArticleIds.has(project.project_id)) && !articlesSelectAll.checked;
+  deleteSelectedButton.disabled = selectedArticleIds.size === 0;
+  document.querySelectorAll<HTMLButtonElement>("[data-article-sort]").forEach((button) => {
+    const active = button.dataset.articleSort === articleSort;
+    button.classList.toggle("active", active);
+    button.textContent = `${button.dataset.articleSort === "created_at" ? "Date added" : "Marked read"}${active ? (articleSortDescending ? " ↓" : " ↑") : ""}`;
+  });
+  if (!rows.length) {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td colspan="7" class="table-empty">No ${articleFilter === "all" ? "articles" : articleFilter} articles.</td>`;
+    articlesTableBody.appendChild(row);
+    return;
+  }
+  rows.forEach((project) => {
+    const row = document.createElement("tr");
+    row.className = project.read ? "read" : "unread";
+    const usage = projectCacheUsage(project.project_id);
+    const selector = document.createElement("input");
+    selector.type = "checkbox";
+    selector.checked = selectedArticleIds.has(project.project_id);
+    selector.setAttribute("aria-label", `Select ${project.title}`);
+    selector.addEventListener("change", () => {
+      if (selector.checked) selectedArticleIds.add(project.project_id);
+      else selectedArticleIds.delete(project.project_id);
+      renderArticles();
+    });
+    const selectionCell = document.createElement("td");
+    selectionCell.appendChild(selector);
+    row.appendChild(selectionCell);
+    row.insertAdjacentHTML("beforeend", `<td class="article-title">${escapeHtml(project.title.trim() || "Untitled reading")}</td><td><span class="read-status ${project.read ? "read" : "unread"}">${project.read ? "Read" : "Unread"}</span></td><td>${formatDate(project.created_at)}</td><td class="read-date">${formatDate(project.read_at)}</td><td>${usage ? formatBytes(usage.bytes) : "—"}</td>`);
+    const actions = document.createElement("td");
+    actions.className = "article-actions";
+    const open = document.createElement("button");
+    open.className = "quiet-button";
+    open.textContent = "Open";
+    open.addEventListener("click", () => void switchProject(project.project_id).then(() => updateMode("listen")));
+    const read = document.createElement("button");
+    read.className = "quiet-button";
+    read.textContent = project.read ? "Unread" : "Read";
+    read.addEventListener("click", () => void setArticleRead(project.project_id, !project.read));
+    const remove = document.createElement("button");
+    remove.className = "quiet-button article-delete";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", () => openDeleteProjectDialog([project.project_id]));
+    actions.append(open, read, remove);
+    row.appendChild(actions);
+    articlesTableBody.appendChild(row);
+  });
+}
+
+function renderStorage(): void {
+  if (!storageStats) return;
+  storageTotal.textContent = `${formatBytes(storageStats.total_bytes)} used by Kokoro Reader`;
+  storageAreas.replaceChildren();
+  const areas: Array<[string, StorageArea]> = [["Models", storageStats.models], ["Audio cache", storageStats.audio_cache], ["Project files", storageStats.project_files], ["App data", storageStats.app_data]];
+  areas.forEach(([label, area]) => {
+    const card = document.createElement("section");
+    card.className = "storage-area";
+    card.innerHTML = `<strong>${label}</strong><span>${formatBytes(area.bytes)}</span><code>${escapeHtml(area.path)}</code>`;
+    const reveal = document.createElement("button");
+    reveal.className = "quiet-button";
+    reveal.textContent = "Reveal in Finder";
+    reveal.disabled = !area.exists;
+    reveal.addEventListener("click", () => void revealItemInDir(area.path).catch(() => setStatus("Could not reveal this folder")));
+    card.appendChild(reveal);
+    storageAreas.appendChild(card);
+  });
+  storageProjectList.replaceChildren();
+  storageStats.projects.slice(0, 5).forEach((usage) => {
+    const item = document.createElement("li");
+    item.innerHTML = `<span>${escapeHtml(usage.title.trim() || "Untitled reading")}</span><span>${formatBytes(usage.bytes)} · ${usage.cached_clips} clips</span>`;
+    item.addEventListener("click", () => void switchProject(usage.project_id).then(() => updateMode("listen")));
+    storageProjectList.appendChild(item);
+  });
+}
+
+async function refreshStorageStats(): Promise<void> {
+  refreshStorageButton.disabled = true;
+  try {
+    storageStats = await invoke<StorageStats>("storage_stats");
+    renderStorage();
+    renderArticles();
+  } catch (error) {
+    storageTotal.textContent = `Storage unavailable: ${String(error)}`;
+  } finally {
+    refreshStorageButton.disabled = false;
+  }
+}
+
 function renderDocument(): void {
   renderProjectPicker();
   titleInput.value = currentDocument.title;
   titleInput.disabled = !currentProjectId;
   editModeButton.disabled = !currentProjectId;
   reloadFilesButton.disabled = !currentProjectId;
-  if (!currentProjectId) {
-    mode = "listen";
-    listenPane.hidden = false;
-    editPane.hidden = true;
-    listenModeButton.classList.add("active");
-    editModeButton.classList.remove("active");
-    listenModeButton.setAttribute("aria-selected", "true");
-    editModeButton.setAttribute("aria-selected", "false");
-  }
+  searchButton.disabled = !currentProjectId || !currentDocument.sections.length;
+  if (searchButton.disabled && !searchBar.hidden) closeSearch();
+  if (!currentProjectId && (mode === "listen" || mode === "edit")) mode = "listen";
   activeSection = Math.min(activeSection, Math.max(currentDocument.sections.length - 1, 0));
   renderListenView();
   renderEditors();
   renderCacheQueue();
+  renderArticles();
+  renderStorage();
   restoreButton.disabled = !hasPrevious;
 }
 
-async function setProjectRead(read: boolean): Promise<boolean> {
-  if (!currentProjectId) return false;
-  if (currentMetadata.read === read) return true;
-  const projectId = currentProjectId;
+async function setArticleRead(projectId: string, read: boolean): Promise<boolean> {
+  if (!projectId) return false;
+  const summary = projects.find((project) => project.project_id === projectId);
+  if (summary?.read === read) return true;
   try {
     const metadata = await invoke<ProjectMetadata>("set_project_read", { projectId, read });
-    if (projectId !== currentProjectId) return false;
-    currentMetadata = metadata;
-    const summary = projects.find((project) => project.project_id === projectId);
-    if (summary) summary.read = metadata.read;
+    if (projectId === currentProjectId) currentMetadata = metadata;
+    if (summary) {
+      summary.read = metadata.read;
+      summary.read_at = metadata.read_at;
+    }
     renderProjectPicker();
+    renderArticles();
     return true;
   } catch (error) {
-    if (projectId === currentProjectId) setStatus(`Read status failed: ${String(error)}`);
+    setStatus(`Read status failed: ${String(error)}`);
     return false;
   }
+}
+
+async function setProjectRead(read: boolean): Promise<boolean> {
+  return setArticleRead(currentProjectId, read);
 }
 
 async function openCodexOrigin(): Promise<void> {
@@ -1000,15 +1484,21 @@ async function flushPendingSave(): Promise<boolean> {
   const projectId = currentProjectId;
   const document = cloneDocument(currentDocument);
   try {
-    const saved = await invoke<ProjectDocument>("save_document", { projectId, document });
+    saveInFlight = true;
+    const saved = await invoke<ProjectDocument>("save_document", { projectId, document, expectedRevision: currentRevision });
     if (saved.project_id === currentProjectId) {
       currentDocument = saved.document;
       currentMetadata = saved.metadata;
+      currentRevision = saved.revision;
+      editorDirty = false;
     }
     return true;
   } catch (error) {
+    if (String(error).startsWith("STALE_DRAFT:")) showDraftConflict(pendingExternalRevision);
     setStatus(`Save failed: ${String(error)}`);
     return false;
+  } finally {
+    saveInFlight = false;
   }
 }
 
@@ -1019,33 +1509,169 @@ function scheduleSave(): void {
   saveTimer = window.setTimeout(() => {
     saveTimer = undefined;
     if (!projectId) return;
-    void invoke<ProjectDocument>("save_document", { projectId, document })
+    saveInFlight = true;
+    void invoke<ProjectDocument>("save_document", { projectId, document, expectedRevision: currentRevision })
       .then((saved) => {
         if (saved.project_id === currentProjectId) {
           currentDocument = saved.document;
           currentMetadata = saved.metadata;
+          currentRevision = saved.revision;
+          editorDirty = false;
         }
         const summary = projects.find((project) => project.project_id === saved.project_id);
         if (summary) summary.title = saved.document.title;
         renderProjectPicker();
         setStatus("Saved");
       })
-      .catch((error: unknown) => setStatus(`Save failed: ${String(error)}`));
+      .catch((error: unknown) => {
+        if (String(error).startsWith("STALE_DRAFT:")) showDraftConflict(pendingExternalRevision);
+        setStatus(`Save failed: ${String(error)}`);
+      })
+      .finally(() => { saveInFlight = false; });
   }, 300);
 }
 
-function updateMode(nextMode: "listen" | "edit"): void {
+function renderDiagnostics(): void {
+  const ready = sectionDiagnostics.length > 0 && sectionDiagnostics.every((section) => section.ready);
+  alignmentStatus.className = `alignment-status${ready ? " ready" : " error"}`;
+  alignmentStatus.textContent = sectionDiagnostics.length ? (ready ? "Ready to transfer" : "Needs narration work") : "Checking alignment…";
+  diagnosticsPanel.replaceChildren();
+  sectionDiagnostics.flatMap((section) => section.diagnostics.map((diagnostic) => ({ section, diagnostic }))).forEach(({ section, diagnostic }) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `diagnostic-item ${diagnostic.severity}`;
+    button.textContent = `Section ${section.section_index}: ${diagnostic.message}`;
+    button.addEventListener("click", () => focusDiagnostic(section, diagnostic));
+    diagnosticsPanel.appendChild(button);
+  });
+}
+
+function focusDiagnostic(section: SectionPrecheckResult, diagnostic: SectionDiagnostic): void {
+  const index = section.section_index - 1;
+  const narration = narrationEditor.querySelector<HTMLTextAreaElement>(`#narration-${index}`);
+  if (diagnostic.narration_range && narration) {
+    narration.setSelectionRange(diagnostic.narration_range.start_utf16, diagnostic.narration_range.end_utf16);
+    narration.scrollIntoView({ block: "center" });
+  }
+  if (diagnostic.source_range) {
+    const offset = currentDocument.sections.slice(0, index).reduce((total, item) => total + item.markdown.length + "\n\n<!-- kokoro-reader-section -->\n\n".length, 0);
+    markdownEditor.setSelectionRange(offset + diagnostic.source_range.start_utf16, offset + diagnostic.source_range.end_utf16);
+    markdownEditor.focus();
+  } else narration?.focus();
+}
+
+function scheduleValidation(): void {
+  if (validationTimer !== undefined) window.clearTimeout(validationTimer);
+  const generation = ++validationGeneration;
+  validationTimer = window.setTimeout(() => {
+    validationTimer = undefined;
+    const sections = currentDocument.sections.map((section, index) => ({ sectionIndex: index + 1, markdown: section.markdown, speechText: section.speech_text }));
+    void invoke<SectionsPrecheckResult>("precheck_sections", { sections })
+      .then((result) => {
+        if (generation !== validationGeneration) return;
+        sectionDiagnostics = result.sections;
+        renderDiagnostics();
+      })
+      .catch((error: unknown) => {
+        if (generation !== validationGeneration) return;
+        alignmentStatus.className = "alignment-status error";
+        alignmentStatus.textContent = `Validation failed: ${String(error)}`;
+      });
+  }, 250);
+}
+
+function showDraftConflict(revision: string): void {
+  pendingExternalRevision = revision;
+  keepEditsButton.hidden = !editorDirty && !saveInFlight;
+  draftConflict.hidden = false;
+}
+
+async function reloadDiskDraft(): Promise<void> {
+  const reloaded = await invoke<ProjectDocument>("reload_shared_document", { projectId: currentProjectId });
+  currentDocument = reloaded.document;
+  currentMetadata = reloaded.metadata;
+  currentRevision = reloaded.revision;
+  editorDirty = false;
+  pendingExternalRevision = "";
+  draftConflict.hidden = true;
+  renderDocument();
+  setStatus("Reloaded external draft");
+}
+
+function updateMode(nextMode: ViewMode): void {
   if (!currentProjectId && nextMode === "edit") return;
   if (mode === nextMode) return;
+  if (mode === "edit" && nextMode !== "edit") clearEditTarget();
+  if (nextMode !== "listen" && !searchBar.hidden) closeSearch();
   stopPlayback();
   mode = nextMode;
-  listenModeButton.classList.toggle("active", mode === "listen");
-  editModeButton.classList.toggle("active", mode === "edit");
-  listenModeButton.setAttribute("aria-selected", String(mode === "listen"));
-  editModeButton.setAttribute("aria-selected", String(mode === "edit"));
+  const tabs: Array<[HTMLButtonElement, ViewMode]> = [[listenModeButton, "listen"], [editModeButton, "edit"], [articlesModeButton, "articles"], [storageModeButton, "storage"]];
+  tabs.forEach(([button, tab]) => {
+    button.classList.toggle("active", mode === tab);
+    button.setAttribute("aria-selected", String(mode === tab));
+  });
   listenPane.hidden = mode !== "listen";
   editPane.hidden = mode !== "edit";
-  if (mode === "edit") markdownEditor.focus();
+  articlesPane.hidden = mode !== "articles";
+  storagePane.hidden = mode !== "storage";
+  workspaceToolbar.hidden = mode === "articles" || mode === "storage";
+  playerBar.hidden = mode === "articles" || mode === "storage";
+  if (mode === "edit") applyEditTarget();
+  if (mode === "articles") {
+    renderArticles();
+    void refreshStorageStats();
+  }
+  if (mode === "storage") void refreshStorageStats();
+}
+
+function applyEditTarget(): void {
+  narrationEditor.querySelectorAll(".narration-section.edit-target").forEach((element) => element.classList.remove("edit-target"));
+  markdownEditor.classList.remove("edit-target");
+  if (!editTarget) {
+    markdownEditor.focus();
+    return;
+  }
+  const section = currentDocument.sections[editTarget.sectionIndex];
+  if (!section) return;
+  const narrationRange = speechChunkRanges(section.speech_text)[editTarget.clipIndex] ?? { start: 0, end: section.speech_text.length };
+  const narrationTextarea = narrationEditor.querySelector<HTMLTextAreaElement>(`#narration-${editTarget.sectionIndex}`);
+  narrationTextarea?.setSelectionRange(narrationRange.start, narrationRange.end);
+  narrationTextarea?.closest(".narration-section")?.classList.add("edit-target");
+  narrationTextarea?.scrollIntoView({ block: "center" });
+  const markdownStart = currentDocument.sections.slice(0, editTarget.sectionIndex)
+    .reduce((offset, item) => offset + item.markdown.length + 2, 0);
+  const passage = bestMarkdownPassage(section.markdown, narrationRange.text);
+  markdownEditor.setSelectionRange(markdownStart + passage.start, markdownStart + passage.end);
+  markdownEditor.classList.add("edit-target");
+  markdownEditor.focus();
+}
+
+function clearEditTarget(): void {
+  editTarget = null;
+  markdownEditor.classList.remove("edit-target");
+  narrationEditor.querySelectorAll(".narration-section.edit-target").forEach((element) => element.classList.remove("edit-target"));
+}
+
+function contextEditTarget(sectionIndex: number | null): { sectionIndex: number; clipIndex: number } | null {
+  if (!currentProjectId) return null;
+  if (currentPlayback?.projectId === currentProjectId) return { sectionIndex: currentPlayback.sectionIndex, clipIndex: currentPlayback.clipIndex };
+  if (playbackPosition?.voice === selectedVoice()) return { sectionIndex: playbackPosition.sectionIndex, clipIndex: playbackPosition.clipIndex };
+  return { sectionIndex: sectionIndex ?? activeSection, clipIndex: 0 };
+}
+
+async function openReaderContextMenu(event: MouseEvent): Promise<void> {
+  event.preventDefault();
+  const sectionIndex = Number((event.target as Element).closest<HTMLElement>("[data-section-index]")?.dataset.sectionIndex);
+  const target = contextEditTarget(Number.isFinite(sectionIndex) ? sectionIndex : null);
+  const menu = await Menu.new({ items: [
+    { text: "Edit current passage", enabled: Boolean(target), action: () => {
+      if (!target) return;
+      editTarget = target;
+      updateMode("edit");
+    } },
+    { text: "Reload", action: () => window.location.reload() },
+  ] });
+  await menu.popup(new LogicalPosition(event.clientX, event.clientY));
 }
 
 function updatePlayerControls(): void {
@@ -1126,7 +1752,11 @@ async function loadDocument(): Promise<void> {
   const loaded = await invoke<ProjectDocument | null>("get_document");
   currentProjectId = loaded?.project_id ?? "";
   currentDocument = loaded?.document ?? { title: "", sections: [] };
-  currentMetadata = loaded?.metadata ?? { read: false, codex_url: null };
+  currentMetadata = loaded?.metadata ?? { read: false, created_at: null, read_at: null, codex_url: null };
+  currentRevision = loaded?.revision ?? "";
+  editorDirty = false;
+  pendingExternalRevision = "";
+  draftConflict.hidden = true;
   restorePlaybackSelection();
   renderDocument();
 }
@@ -1173,6 +1803,8 @@ async function switchProject(projectId: string): Promise<void> {
     currentProjectId = loaded.project_id;
     currentDocument = loaded.document;
     currentMetadata = loaded.metadata;
+    currentRevision = loaded.revision;
+    editorDirty = false;
     if (!currentDocument.sections.length) {
       currentDocument.sections = [{ markdown: "", speech_text: "", speech_mode: "automatic" }];
     }
@@ -1188,8 +1820,15 @@ async function switchProject(projectId: string): Promise<void> {
 }
 
 async function deleteCurrentProject(): Promise<void> {
-  if (!currentProjectId) return;
-  deleteProjectMessage.textContent = `Delete “${currentDocument.title.trim() || "Untitled reading"}” and its saved files? This cannot be undone.`;
+  if (currentProjectId) openDeleteProjectDialog([currentProjectId]);
+}
+
+function openDeleteProjectDialog(projectIds: string[]): void {
+  pendingDeleteProjectIds = [...new Set(projectIds)];
+  if (!pendingDeleteProjectIds.length) return;
+  deleteProjectMessage.textContent = pendingDeleteProjectIds.length === 1
+    ? `Delete this article and its saved files? This cannot be undone.`
+    : `Delete ${pendingDeleteProjectIds.length} selected articles and their saved files? This cannot be undone.`;
   deleteProjectDialog.hidden = false;
   confirmDeleteProjectButton.focus();
 }
@@ -1200,24 +1839,28 @@ function closeDeleteProjectDialog(): void {
 }
 
 async function confirmDeleteCurrentProject(): Promise<void> {
-  if (!currentProjectId) return;
+  const projectIds = pendingDeleteProjectIds;
+  if (!projectIds.length) return;
   closeDeleteProjectDialog();
-  const title = currentDocument.title.trim() || "Untitled reading";
-  const deletedProjectId = currentProjectId;
+  pendingDeleteProjectIds = [];
   if (!(await flushPendingSave())) return;
   stopPlayback(false);
-  cacheQueue = cacheQueue.filter((task) => task.projectId !== currentProjectId);
+  cacheQueue = cacheQueue.filter((task) => !projectIds.includes(task.projectId));
+  projectIds.forEach(clearPlaybackPosition);
+  projectIds.forEach((projectId) => selectedArticleIds.delete(projectId));
   renderCacheQueue();
   try {
-    const next = await invoke<ProjectDocument | null>("delete_project", { projectId: currentProjectId });
+    const next = projectIds.length === 1
+      ? await invoke<ProjectDocument | null>("delete_project", { projectId: projectIds[0] })
+      : await invoke<ProjectDocument | null>("delete_projects", { projectIds });
     currentProjectId = next?.project_id ?? "";
     currentDocument = next?.document ?? { title: "", sections: [] };
-    currentMetadata = next?.metadata ?? { read: false, codex_url: null };
-    clearPlaybackPosition(deletedProjectId);
+    currentMetadata = next?.metadata ?? { read: false, created_at: null, read_at: null, codex_url: null };
     restorePlaybackSelection();
     await Promise.all([loadProjects(), loadRecoveryStatus()]);
     renderDocument();
-    setStatus(next ? `Deleted “${title}”; selected “${next.document.title}”` : `Deleted “${title}”; no projects remain`);
+    setStatus(next ? `Deleted ${projectIds.length} article${projectIds.length === 1 ? "" : "s"}; selected “${next.document.title}”` : `Deleted ${projectIds.length} article${projectIds.length === 1 ? "" : "s"}; no articles remain`);
+    void refreshStorageStats();
     scheduleCacheQueueRebuild();
   } catch (error) {
     setStatus(`Project delete failed: ${String(error)}`);
@@ -1296,6 +1939,7 @@ function playAsset(asset: AudioAsset, item: PlaybackQueueItem, projectId: string
         isPlaying = true;
         setStatus(asset.cache_hit ? "Playing from cache" : "Playing");
         updatePlayerControls();
+        updatePlaybackVisuals();
       }).catch(failed);
     };
     const finished = (): void => {
@@ -1403,8 +2047,11 @@ function togglePlayback(): void {
   if (isPlaying && !audioPlayer.paused) {
     audioPlayer.pause();
     setStatus("Paused");
+    updatePlaybackVisuals();
   } else if (isPlaying && audioPlayer.src) {
-    void audioPlayer.play().catch((error: unknown) => setStatus(`Playback failed: ${String(error)}`));
+    void audioPlayer.play()
+      .then(() => updatePlaybackVisuals())
+      .catch((error: unknown) => setStatus(`Playback failed: ${String(error)}`));
   } else {
     void playFromSection(activeSection);
   }
@@ -1435,12 +2082,42 @@ sectionNavigator.addEventListener("mouseleave", () => setNavigatorFocus(null));
 playButton.addEventListener("click", () => {
   togglePlayback();
 });
+searchButton.addEventListener("click", openSearch);
+searchInput.addEventListener("input", () => {
+  searchQuery = searchInput.value;
+  searchActiveIndex = 0;
+  renderSearchHighlights(true);
+});
+searchInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    navigateSearch(event.shiftKey ? -1 : 1);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    closeSearch();
+  }
+});
+searchPreviousButton.addEventListener("click", () => navigateSearch(-1));
+searchNextButton.addEventListener("click", () => navigateSearch(1));
+searchCloseButton.addEventListener("click", closeSearch);
 audioPlayer.addEventListener("timeupdate", persistCurrentPlaybackPosition);
 audioPlayer.addEventListener("pause", persistCurrentPlaybackPosition);
 window.addEventListener("beforeunload", persistCurrentPlaybackPosition);
 
 document.addEventListener("keydown", (event) => {
   if (event.defaultPrevented || event.isComposing) return;
+
+  const findCommand = (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "f";
+  if (findCommand) {
+    event.preventDefault();
+    openSearch();
+    return;
+  }
+  if (event.key === "Escape" && !searchBar.hidden) {
+    event.preventDefault();
+    closeSearch();
+    return;
+  }
 
   const command = event.metaKey && !event.ctrlKey && !event.altKey;
   if (command && (event.key === "+" || event.key === "=")) {
@@ -1518,13 +2195,51 @@ document.addEventListener("keydown", (event) => {
 });
 listenModeButton.addEventListener("click", () => updateMode("listen"));
 editModeButton.addEventListener("click", () => updateMode("edit"));
+articlesModeButton.addEventListener("click", () => updateMode("articles"));
+storageModeButton.addEventListener("click", () => updateMode("storage"));
+articlesFilter.addEventListener("change", () => {
+  articleFilter = articlesFilter.value as ArticleFilter;
+  selectedArticleIds.clear();
+  renderArticles();
+});
+articlesSelectAll.addEventListener("change", () => {
+  articleRows().forEach((project) => {
+    if (articlesSelectAll.checked) selectedArticleIds.add(project.project_id);
+    else selectedArticleIds.delete(project.project_id);
+  });
+  renderArticles();
+});
+document.querySelectorAll<HTMLButtonElement>("[data-article-sort]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const sort = button.dataset.articleSort as ArticleSort;
+    articleSortDescending = articleSort === sort ? !articleSortDescending : true;
+    articleSort = sort;
+    renderArticles();
+  });
+});
+deleteSelectedButton.addEventListener("click", () => openDeleteProjectDialog([...selectedArticleIds]));
+refreshStorageButton.addEventListener("click", () => void refreshStorageStats());
+markdownView.addEventListener("contextmenu", (event) => void openReaderContextMenu(event));
 themeToggle.addEventListener("click", () => {
   applyTheme(preferences.theme === "dark" ? "light" : "dark");
   savePreferences();
 });
-markdownEditor.addEventListener("input", updateSectionsFromMarkdown);
+markdownEditor.addEventListener("input", () => {
+  clearEditTarget();
+  editorDirty = true;
+  updateSectionsFromMarkdown();
+});
 titleInput.addEventListener("input", () => {
   currentDocument.title = titleInput.value;
+  editorDirty = true;
+  scheduleSave();
+  scheduleValidation();
+});
+reloadDiskButton.addEventListener("click", () => void reloadDiskDraft().catch((error: unknown) => setStatus(`Reload failed: ${String(error)}`)));
+keepEditsButton.addEventListener("click", () => {
+  currentRevision = pendingExternalRevision || currentRevision;
+  pendingExternalRevision = "";
+  draftConflict.hidden = true;
   scheduleSave();
 });
 voiceSelect.addEventListener("change", () => {
@@ -1540,6 +2255,7 @@ voiceSelect.addEventListener("change", () => {
 speedSlider.addEventListener("input", () => {
   setSpeed(Number(speedSlider.value));
 });
+articleTimer.addEventListener("click", toggleArticleTimer);
 speedPresetButtons.forEach((button) => {
   button.addEventListener("click", () => setSpeed(Number(button.dataset.speed)));
 });
@@ -1551,6 +2267,8 @@ restoreButton.addEventListener("click", () => {
       currentProjectId = restored.project_id;
       currentDocument = restored.document;
       currentMetadata = restored.metadata;
+      currentRevision = restored.revision;
+      editorDirty = false;
       restorePlaybackSelection();
       renderDocument();
       void loadRecoveryStatus();
@@ -1566,6 +2284,8 @@ reloadFilesButton.addEventListener("click", () => {
       currentProjectId = reloaded.project_id;
       currentDocument = reloaded.document;
       currentMetadata = reloaded.metadata;
+      currentRevision = reloaded.revision;
+      editorDirty = false;
       restorePlaybackSelection();
       renderDocument();
       void loadRecoveryStatus();
@@ -1596,13 +2316,7 @@ void listen("document-updated", () => {
   cancelScheduledSave();
   stopPlayback(false);
   void loadDocument().then(() => Promise.all([loadProjects(), loadRecoveryStatus()])).then(() => {
-    mode = "listen";
-    listenPane.hidden = false;
-    editPane.hidden = true;
-    listenModeButton.classList.add("active");
-    editModeButton.classList.remove("active");
-    listenModeButton.setAttribute("aria-selected", "true");
-    editModeButton.setAttribute("aria-selected", "false");
+    if (mode !== "listen") updateMode("listen");
     setStatus("Document received from Codex");
     scheduleCacheQueueRebuild();
   });
